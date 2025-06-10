@@ -100,12 +100,15 @@ async function proxyToService(serviceKey, request, reply) {
   try {
     const service = SERVICES[serviceKey];
     if (!service) {
+      fastify.log.error(`Service not found: ${serviceKey}`);
       return reply.code(404).send({ error: 'Service not found' });
     }
 
     // Build target URL
     const targetPath = request.url.replace(service.prefix, '');
     const targetUrl = `${service.url}${targetPath}`;
+
+    fastify.log.debug(`Proxying ${request.method} ${request.url} to ${targetUrl}`);
 
     // Prepare headers
     const headers = { ...request.headers };
@@ -124,8 +127,7 @@ async function proxyToService(serviceKey, request, reply) {
 
     // Handle request body for POST/PUT requests
     if (['POST', 'PUT', 'PATCH'].includes(request.method.toUpperCase())) {
-      if (request.isMultipart()) {
-        // Handle multipart form data (file uploads)
+      if (request.headers['content-type'] && request.headers['content-type'].includes('multipart/form-data')) {
         config.data = request.body;
         config.headers['content-type'] = request.headers['content-type'];
       } else {
@@ -147,20 +149,63 @@ async function proxyToService(serviceKey, request, reply) {
     reply.code(response.status).send(response.data);
 
   } catch (error) {
-    fastify.log.error('Proxy error:', error);
+    // Enhanced error logging with more details
+    fastify.log.error('Proxy error details:', {
+      serviceKey,
+      url: request.url,
+      method: request.method,
+      targetService: SERVICES[serviceKey]?.url,
+      errorCode: error.code,
+      errorMessage: error.message,
+      errorStack: error.stack,
+      response: error.response ? {
+        status: error.response.status,
+        statusText: error.response.statusText,
+        data: error.response.data
+      } : null
+    });
     
-    if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
+    if (error.code === 'ECONNREFUSED') {
+      fastify.log.error(`Connection refused to service ${serviceKey} at ${SERVICES[serviceKey]?.url}`);
       return reply.code(503).send({ 
         error: 'Service temporarily unavailable',
+        service: serviceKey,
+        details: `Cannot connect to ${serviceKey} service`
+      });
+    }
+    
+    if (error.code === 'ENOTFOUND') {
+      fastify.log.error(`DNS resolution failed for service ${serviceKey} at ${SERVICES[serviceKey]?.url}`);
+      return reply.code(503).send({ 
+        error: 'Service host not found',
+        service: serviceKey,
+        details: `DNS resolution failed for ${serviceKey} service`
+      });
+    }
+
+    if (error.code === 'ETIMEDOUT') {
+      fastify.log.error(`Request timeout for service ${serviceKey}`);
+      return reply.code(504).send({ 
+        error: 'Service request timeout',
         service: serviceKey
       });
     }
     
     if (error.response) {
+      fastify.log.error(`Service ${serviceKey} returned error:`, {
+        status: error.response.status,
+        data: error.response.data
+      });
       return reply.code(error.response.status).send(error.response.data);
     }
     
-    return reply.code(500).send({ error: 'Internal gateway error' });
+    // Generic error
+    fastify.log.error(`Unexpected error proxying to ${serviceKey}:`, error);
+    return reply.code(500).send({ 
+      error: 'Internal gateway error',
+      service: serviceKey,
+      details: error.message
+    });
   }
 }
 

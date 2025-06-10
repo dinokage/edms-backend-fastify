@@ -1,19 +1,17 @@
 services:
-  # PG Amin for PostgreSQL management
-  pgadmin:
-    image: dpage/pgadmin4:latest
-    environment:
-      PGADMIN_DEFAULT_EMAIL: admin@dinokage.in
-      PGADMIN_DEFAULT_PASSWORD: Pressword@69
-    ports:
-      - "5050:80"
-# Database
+  # ===============================
+  # INFRASTRUCTURE SERVICES
+  # ===============================
+
+  # PostgreSQL Database
   postgres:
     image: postgres:15
+    container_name: edms_postgres
     environment:
       POSTGRES_DB: edms
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: password
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./shared/database/init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -24,10 +22,51 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - edms-network
+
+  # PG Admin for PostgreSQL management
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: edms_pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@dinokage.in
+      PGADMIN_DEFAULT_PASSWORD: Pressword@69
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+    ports:
+      - "5050:80"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - edms-network
+
+  # Redis for caching and pub/sub
+  redis:
+    image: redis:7-alpine
+    container_name: edms_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - edms-network
 
   # MinIO Object Storage
   minio:
     image: minio/minio:latest
+    container_name: edms_minio
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -39,58 +78,24 @@ services:
       - "9001:9001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # Redis for caching and pub/sub
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # API Gateway
-  api-gateway:
-    build:
-      context: ./services/api-gateway
-      dockerfile: Dockerfile
-    ports:
-      - "3000:3000"
-    environment:
-      - NODE_ENV=development
-      - AUTH_SERVICE_URL=http://auth-service:3001
-      - DOCUMENT_SERVICE_URL=http://document-service:3002
-      - VERSION_CONTROL_SERVICE_URL=http://version-control-service:3008
-      - WORKFLOW_SERVICE_URL=http://workflow-service:3003
-      - SEARCH_SERVICE_URL=http://search-service:3004
-      - NOTIFICATION_SERVICE_URL=http://notification-service:3005
-      - AUDIT_SERVICE_URL=http://audit-service:3006
-      - REPORTING_SERVICE_URL=http://reporting-service:3007
-      - REDIS_URL=redis://redis:6379
-    depends_on:
-      - redis
-      - auth-service
-      - document-service
-      - version-control-service
-      - workflow-service
-      - search-service
-      - notification-service
-      - audit-service
-      - reporting-service
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
     restart: unless-stopped
+    networks:
+      - edms-network
+
+  # ===============================
+  # APPLICATION SERVICES
+  # ===============================
 
   # Authentication Service
   auth-service:
     build:
       context: ./services/auth-service
       dockerfile: Dockerfile
+    container_name: edms_auth_service
     ports:
       - "3001:3001"
     environment:
@@ -101,17 +106,27 @@ services:
       - DB_NAME=edms
       - DB_USER=admin
       - DB_PASSWORD=password
-      - JWT_SECRET=your-super-secret-jwt-key-change-this-in-production
+      - JWT_SECRET=your-super-secret-jwt-key-change-this-in-production-please
       - JWT_EXPIRES_IN=24h
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3001/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) }).on('error', () => { process.exit(1) })"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - edms-network
 
   # Document Service
   document-service:
     build:
       context: ./services/document-service
       dockerfile: Dockerfile
+    container_name: edms_document_service
     ports:
       - "3002:3002"
     environment:
@@ -129,15 +144,26 @@ services:
       - MINIO_SECRET_KEY=minioadmin123
       - MINIO_BUCKET=edms-documents
     depends_on:
-      - postgres
-      - minio
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3002/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) }).on('error', () => { process.exit(1) })"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - edms-network
 
   # Version Control Service
   version-control-service:
     build:
       context: ./services/version-control-service
       dockerfile: Dockerfile
+    container_name: edms_version_control_service
     ports:
       - "3008:3008"
     environment:
@@ -155,15 +181,26 @@ services:
       - MINIO_SECRET_KEY=minioadmin123
       - MINIO_BUCKET=edms-documents
     depends_on:
-      - postgres
-      - minio
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3008/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) }).on('error', () => { process.exit(1) })"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - edms-network
 
   # Workflow Service
   workflow-service:
     build:
       context: ./services/workflow-service
       dockerfile: Dockerfile
+    container_name: edms_workflow_service
     ports:
       - "3003:3003"
     environment:
@@ -176,15 +213,26 @@ services:
       - DB_PASSWORD=password
       - REDIS_URL=redis://redis:6379
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3003/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) }).on('error', () => { process.exit(1) })"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - edms-network
 
   # Search Service
   search-service:
     build:
       context: ./services/search-service
       dockerfile: Dockerfile
+    container_name: edms_search_service
     ports:
       - "3004:3004"
     environment:
@@ -196,14 +244,24 @@ services:
       - DB_USER=admin
       - DB_PASSWORD=password
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3004/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) }).on('error', () => { process.exit(1) })"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - edms-network
 
   # Notification Service
   notification-service:
     build:
       context: ./services/notification-service
       dockerfile: Dockerfile
+    container_name: edms_notification_service
     ports:
       - "3005:3005"
     environment:
@@ -220,15 +278,26 @@ services:
       - SMTP_USER=your-email@gmail.com
       - SMTP_PASS=your-app-password
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3005/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) }).on('error', () => { process.exit(1) })"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - edms-network
 
   # Audit Service
   audit-service:
     build:
       context: ./services/audit-service
       dockerfile: Dockerfile
+    container_name: edms_audit_service
     ports:
       - "3006:3006"
     environment:
@@ -240,14 +309,24 @@ services:
       - DB_USER=admin
       - DB_PASSWORD=password
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3006/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) }).on('error', () => { process.exit(1) })"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - edms-network
 
   # Reporting Service
   reporting-service:
     build:
       context: ./services/reporting-service
       dockerfile: Dockerfile
+    container_name: edms_reporting_service
     ports:
       - "3007:3007"
     environment:
@@ -259,14 +338,94 @@ services:
       - DB_USER=admin
       - DB_PASSWORD=password
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3007/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) }).on('error', () => { process.exit(1) })"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - edms-network
+
+  # API Gateway - Starts last with dependencies on all services
+  api-gateway:
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    container_name: edms_api_gateway
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+      - HOST=0.0.0.0
+      - AUTH_SERVICE_URL=http://auth-service:3001
+      - DOCUMENT_SERVICE_URL=http://document-service:3002
+      - VERSION_CONTROL_SERVICE_URL=http://version-control-service:3008
+      - WORKFLOW_SERVICE_URL=http://workflow-service:3003
+      - SEARCH_SERVICE_URL=http://search-service:3004
+      - NOTIFICATION_SERVICE_URL=http://notification-service:3005
+      - AUDIT_SERVICE_URL=http://audit-service:3006
+      - REPORTING_SERVICE_URL=http://reporting-service:3007
+      - REDIS_URL=redis://redis:6379
+      - CORS_ORIGIN=true
+      - RATE_LIMIT_MAX=100
+      - RATE_LIMIT_WINDOW=1 minute
+    depends_on:
+      redis:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+      document-service:
+        condition: service_healthy
+      version-control-service:
+        condition: service_healthy
+      workflow-service:
+        condition: service_healthy
+      search-service:
+        condition: service_healthy
+      notification-service:
+        condition: service_healthy
+      audit-service:
+        condition: service_healthy
+      reporting-service:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) }).on('error', () => { process.exit(1) })"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - edms-network
+
+# ===============================
+# VOLUMES
+# ===============================
 
 volumes:
   postgres_data:
+    driver: local
+    name: edms_postgres_data
   minio_data:
+    driver: local
+    name: edms_minio_data
   redis_data:
+    driver: local
+    name: edms_redis_data
+
+# ===============================
+# NETWORKS
+# ===============================
 
 networks:
-  default:
+  edms-network:
     driver: bridge
+    name: edms_network
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
